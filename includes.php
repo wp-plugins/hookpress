@@ -10,26 +10,6 @@ $hookpress_value_options =
         'webhooks' => array()
         );
 
-// BOOTSTRAP
-
-/*update_option('hookpress_webhooks',array(
-array(
-  'url'=>'http://localhost:8888/test.php',
-  'hook'=>'save_post',
-  'enabled'=>true,
-  'fields'=>array('ID','post_date','post_status','post_title')),
-array(
-  'url'=>'http://localhost:8888/test.php',
-  'hook'=>'publish_post',
-  'enabled'=>true,
-  'fields'=>array('ID','post_date','post_status','post_title','post_type')),
-array(
-  'url'=>'http://localhost:8888/test.php',
-  'hook'=>'add_category',
-  'enabled'=>true,
-  'fields'=>array('term_id','slug','taxonomy','description'))
-));*/
-
 // ACTION TYPES
 
 $hookpress_actions = array(
@@ -49,7 +29,8 @@ $hookpress_actions = array(
   'publish_page'=>array('POST'),
   'publish_phone'=>array('POST'),
   'publish_post'=>array('POST'),
-  'save_post'=>array('POST'), // TODO: make sure the original post stuff is working
+  'save_post'=>array('POST', 'PARENT_POST'),
+  // TODO: make sure the original post stuff is working
   'wp_insert_post'=>array('POST'),
   'xmlrpc_publish_post'=>array('POST'),
 
@@ -73,11 +54,25 @@ $hookpress_actions = array(
   // TODO: ADD MORE...
 );
 
-//'comment_post'
+$hookpress_filters = array(
+  'attachment_icon'=>array('icon','ATTACHMENT'),
+  'attachment_innerHTML'=>array('attachment_html','ATTACHMENT'),
+  'content_edit_pre'=>array('content'),
+  'excerpt_edit_pre'=>array('excerpt'),
+  'get_attached_file'=>array('file','ATTACHMENT'),
+  'get_enclosed'=>array('enclosures'),
+  'get_pages'=>array('pages','arguments'),
+  'get_pung'=>array('pung_urls'),
+  
+  'the_content'=>array('content')
+  
+  // TODO: ADD MORE...
+);
 
 function hookpress_get_fields($type) {
   global $wpdb;
   $map = array('POST' => array($wpdb->posts),
+               'PARENT_POST' => array($wpdb->posts),
                'COMMENT' => array($wpdb->comments),
                'CATEGORY' => array($wpdb->terms,$wpdb->term_taxonomy),
                'ATTACHMENT' => array($wpdb->posts));
@@ -86,28 +81,41 @@ function hookpress_get_fields($type) {
   foreach ($tables as $table) {
     $fields = array_merge($fields,$wpdb->get_col("show columns in $table"));
   }
+
+  // if it's a POST, we have a URL for it as well.
+  if ($type == 'POST' || $type == 'PARENT_POST')
+    $fields[] = 'post_url';
+
+  if ($type == 'PARENT_POST')
+    $fields = array_map(create_function('$x','return "parent_$x";'),$fields);
+
   return array_unique($fields);
 }
 
 // MAGIC
 
 function hookpress_register_hooks() {
-  global $hookpress_callbacks, $hookpress_actions;
+  global $hookpress_callbacks, $hookpress_actions, $hookpress_filters;
   $hookpress_callbacks = array();
   
+  if (!is_array(get_option('hookpress_webhooks')))
+    return;
   foreach (get_option('hookpress_webhooks') as $id => $desc) {
     if (count($desc) && $desc['enabled']) {
       $hookpress_callbacks[$id] = create_function('','
         $args = func_get_args();
-        hookpress_generic_action('.$id.',$args);
+        return hookpress_generic_action('.$id.',$args);
       ');
-      add_action($desc['hook'], $hookpress_callbacks[$id], HOOKPRESS_PRIORITY, count($hookpress_actions[$desc['hook']]));
+      if (isset($desc['type']) && $desc['type'] == 'filter')
+        add_filter($desc['hook'], $hookpress_callbacks[$id], HOOKPRESS_PRIORITY, count($hookpress_filters[$desc['hook']]));
+      else
+        add_action($desc['hook'], $hookpress_callbacks[$id], HOOKPRESS_PRIORITY, count($hookpress_actions[$desc['hook']]));
     }
   }
 }
 
 function hookpress_generic_action($id,$args) {
-  global $hookpress_version, $wpdb, $hookpress_actions;
+  global $hookpress_version, $wpdb, $hookpress_actions, $hookpress_filters;
   
   $webhooks = get_option('hookpress_webhooks');
   $desc = $webhooks[$id];
@@ -115,7 +123,10 @@ function hookpress_generic_action($id,$args) {
   $obj = array();
   
   // generate the expected argument names
-  $arg_names = $hookpress_actions[$desc['hook']];
+  if (isset($desc['type']) && $desc['type'] == 'filter')
+    $arg_names = $hookpress_filters[$desc['hook']];  
+  else
+    $arg_names = $hookpress_actions[$desc['hook']];
   
   foreach($args as $i => $arg) {
     $newobj = array();
@@ -124,12 +135,18 @@ function hookpress_generic_action($id,$args) {
       case 'ATTACHMENT':
       case 'LINK':
         $newobj = get_post($arg,ARRAY_A);
+
+        if ($arg_names[$i] == 'POST')
+          $newobj["post_url"] = get_permalink($newobj["ID"]);
+          
         if (wp_is_post_revision($arg)) {
           $parent = get_post(wp_is_post_revision($arg));
           foreach ($parent as $key => $val) {
             $newobj["parent_$key"] = $val;
           }
+          $newobj["parent_post_url"] = get_permalink($newobj["parent_ID"]);
         }
+        
         break;
       case 'COMMENT':
         $newobj = $wpdb->get_row("select * from $wpdb->comments where comment_ID = $arg",ARRAY_A);
@@ -159,6 +176,7 @@ function hookpress_generic_action($id,$args) {
     // TODO: add authentication settings.
     // snoopy->user = "me";
     // $snoopy->pass = "p@ssw0rd";
+    $snoopy->maxredirs = 0;
     $snoopy->agent = "HookPress/$hookpress_version (compatible; WordPress ".$GLOBALS['wp_version']."; +http://mitcho.com/code/hookpress/)";
     $snoopy->referer = get_bloginfo('siteurl');
     $result = $snoopy->submit($url,$obj_to_post);
@@ -172,9 +190,11 @@ function hookpress_print_webhook($id) {
   $webhooks = get_option('hookpress_webhooks');
   $desc = $webhooks[$id];
   $fields = implode('</code>, <code>',$desc['fields']);
+  if (!isset($desc['type']))
+    $desc['type'] = 'action';
   return "<tr id='$id'><td>".
   ($desc['enabled']?"<a href='#' id='on$id' style='font-size: 0.7em' class='on' title='click to turn off'>ON</a>":"<a href='#' id='off$id' style='font-size: 0.7em' class='off' title='click to turn on'>OFF</a>")
-  ."</td><td><code><span style='font-weight: bold'>$desc[hook]</span></code></td><td><code>$desc[url]</code></td><td><code>"
+  ."</td><td>$desc[type]:</td><td><code><span style='font-weight: bold'>$desc[hook]</span></code></td><td><code>$desc[url]</code></td><td><code>"
   .$fields
-  ."</code></td><td><!--<a href='#' id='edit$id' class='edit'>[edit]</a> --><a href='#' id='delete$id' class='delete'>[delete]</a></td></tr>";
+  ."</code></td><td><!-- style='width:7em'--><!--<a class='thickbox edit' title='Edit webhook' href='#TB_inline?inlineId=hookpress-new-webhook&height=330&width=500' id='edit$id'>[edit]</a> --><a href='#' id='delete$id' class='delete'>[delete]</a></td></tr>";
 }
