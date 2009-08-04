@@ -1,8 +1,12 @@
 <?php
 
 function hookpress_ajax_get_fields() {
-  global $wpdb, $hookpress_actions;
-  $args = $hookpress_actions[$_POST['hook']];
+  global $wpdb, $hookpress_actions, $hookpress_filters;
+  if ($_POST['type'] == 'action')
+    $args = $hookpress_actions[$_POST['hook']];
+  if ($_POST['type'] == 'filter')
+    $args = $hookpress_filters[$_POST['hook']];
+
   $fields = array();
   foreach ($args as $arg) {
     if (ereg('[A-Z]+',$arg))
@@ -13,6 +17,10 @@ function hookpress_ajax_get_fields() {
 
 	header("Content-Type: text/html; charset=UTF-8");
 
+  if ($_POST['type'] == 'filter') {
+    $first = array_shift($fields);
+    echo "<option value='$first' selected='selected' class='first'>$first</option>";
+  }
 	sort($fields);
 	foreach ($fields as $field) {
     echo "<option value='$field'>$field</option>";
@@ -26,6 +34,7 @@ function hookpress_ajax_add_fields() {
   $webhooks = get_option('hookpress_webhooks');
   $newhook = array(
     'url'=>$_POST['url'],
+    'type'=>$_POST['type'],
     'hook'=>$_POST['hook'],
     'fields'=>split(',',$_POST['fields']),
     'enabled'=>true
@@ -55,13 +64,29 @@ function hookpress_ajax_set_enabled() {
 
 function hookpress_ajax_delete_hook() {
   $webhooks = get_option('hookpress_webhooks');
-  $id = $_POST['id'];
-  if (!$id)
+  if (!isset($_POST['id']))
     die("ERROR: no id given");
+  $id = $_POST['id'];
   if (!$webhooks[$id])
     die("ERROR: no webhook found for that id");
   $webhooks[$id] = array();
   update_option('hookpress_webhooks', $webhooks);
   echo "ok";
+  exit;
+}
+
+function hookpress_ajax_get_hooks() {
+  global $wpdb, $hookpress_actions, $hookpress_filters;
+  if ($_POST['type'] == 'action')
+    $hooks = array_keys($hookpress_actions);
+  if ($_POST['type'] == 'filter')
+    $hooks = array_keys($hookpress_filters);
+
+	header("Content-Type: text/html; charset=UTF-8");
+
+	sort($hooks);
+	foreach ($hooks as $hook) {
+    echo "<option value='$hook'>$hook</option>";
+  }
   exit;
 }
